@@ -1,0 +1,51 @@
+name: Retain verified notebook repair objects
+on:
+  push:
+    branches: [maintenance/public-audit-20260930]
+    paths: [.github/workflows/retain-verified-repair-blobs.yml]
+permissions:
+  contents: write
+jobs:
+  retain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 47b83793760c9c6a6f50ebb2bdc772b959bb21f6
+          persist-credentials: false
+      - name: Verify already-tested bytes and retain content blobs without changing any branch
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import base64, hashlib, json, os, pathlib, subprocess, sys, urllib.request
+          url = 'https://raw.githubusercontent.com/hyouo/longeclaw/0eeb48b02e71a4ebcad2e3500f154b568481bf32/.github/maintenance/apply-public-repairs.py'
+          with urllib.request.urlopen(url, timeout=30) as response:
+              code = response.read()
+          if hashlib.sha256(code).hexdigest() != 'd6f29d9e87487c6859bb2368ad24692466b9eb9057eebb874ba13b84f706f5e4':
+              raise RuntimeError('Repair helper integrity error')
+          helper = pathlib.Path(os.environ['RUNNER_TEMP']) / 'apply-public-repairs.py'
+          helper.write_bytes(code)
+          subprocess.run([sys.executable, str(helper)], check=True)
+          record = json.loads((helper.parent / 'public-repair-record.json').read_text())
+          if os.environ['GITHUB_REPOSITORY'] != 'hyouo/scNotebooks' or record['expected_tree'] != '5025ac91bbbe23a371c49376356a3980824d15af':
+              raise RuntimeError('Repository or tree mismatch')
+          stored = []
+          for filename, spec in record['files'].items():
+              if filename.startswith('.github/workflows/'):
+                  continue  # Workflow bytes will be submitted through the authorized connector.
+              data = pathlib.Path(filename).read_bytes()
+              if hashlib.sha256(data).hexdigest() != spec['sha256']:
+                  raise RuntimeError('File integrity error')
+              request = urllib.request.Request('https://api.github.com/repos/hyouo/scNotebooks/git/blobs',
+                  data=json.dumps({'content': base64.b64encode(data).decode(), 'encoding': 'base64'}).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  result = json.load(response)
+              if result['sha'] != spec['sha']:
+                  raise RuntimeError('Stored blob integrity error')
+              stored.append({'path': filename, 'sha': result['sha']})
+              print(filename, result['sha'], flush=True)
+          print('Retained', len(stored), 'verified content blobs; no ref or commit was changed.')
